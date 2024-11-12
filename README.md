@@ -14,7 +14,7 @@ This means TAEM1 should be useful for previewing outputs from Mochi 1.
 
 TAEM1 consists of an MSE-distilled encoder and an MSE+adversarial-distilled decoder, both trained to mimic the Mochi 1 VAE behavior.
 TAEM1 has the `vae_latents_to_dit_latents` and `dit_latents_to_vae_latents` transforms baked in, and consumes/produces [0, 1]-scaled images, so TAEM1 shouldn't require much additional code to use.
-TAEM1 is causal (like the Mochi 1 VAE) so you can either run them timestep-parallel (faster, higher memory usage) or timestep-sequential (slower, reduced memory usage).
+TAEM1 is causal (like the Mochi 1 VAE) so you can either run TAEM1 timestep-parallel (faster, higher memory usage) or timestep-sequential (slower, reduced memory usage).
 
 ## How can I use TAEM1?
 
