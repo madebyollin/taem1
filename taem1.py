@@ -10,6 +10,7 @@ from tqdm.auto import tqdm
 from collections import namedtuple
 
 DecoderResult = namedtuple("DecoderResult", ("frame", "memory"))
+TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))
 
 def conv(n_in, n_out, **kwargs):
     return nn.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
@@ -68,7 +69,7 @@ def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
                 NT, C, H, W = x.shape
                 T = NT // N
                 _x = x.reshape(N, T, C, H, W)
-                mem = F.pad(_x, (0,0,0,0,0,0,1,0), value=0)[:,:T]
+                mem = F.pad(_x, (0,0,0,0,0,0,1,0), value=0)[:,:T].reshape(x.shape) 
                 x = b(x, mem)
             else:
                 x = b(x)
@@ -76,30 +77,71 @@ def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
         T = NT // N
         x = x.view(N, T, C, H, W)
     else:
-        out, in_mem = [], None
-        # iterate over input timesteps and also iterate over blocks
-        # TODO(oboerbohan): this could be optimized to be more friendly to pytorch memory management
-        for xt in tqdm(x.reshape(N, T * C, H, W).chunk(T, dim=1), disable=not show_progress_bar):
-            out_mem = []
-            for b in model:
+        # TODO(oboerbohan): at least on macos this still gradually uses more memory during decode...
+        # need to fix :(
+        out = []
+        # iterate over input timesteps and also iterate over blocks.
+        # because of the cursed TPool/TGrow blocks, this is not a nested loop,
+        # it's actually a ***graph traversal*** problem! so let's make a queue
+        work_queue = [TWorkItem(xt, 0) for t, xt in enumerate(x.reshape(N, T * C, H, W).chunk(T, dim=1))]
+        # in addition to manually managing our queue, we also need to manually manage our progressbar.
+        # we'll update it for every source node that we consume.
+        progress_bar = tqdm(range(T), disable=not show_progress_bar)
+        # we'll also need a separate addressable memory per node as well
+        mem = [None] * len(model)
+        while work_queue:
+            xt, i = work_queue.pop(0)
+            if i == 0:
+                # new source node consumed
+                progress_bar.update(1)
+            if i == len(model):
+                # reached end of the graph, append result to output list
+                out.append(xt)
+            else:
+                # fetch the block to process
+                b = model[i]
                 if isinstance(b, MemBlock):
-                    out_mem.append(xt)
-                    xt = b(xt, xt * 0 if in_mem is None else in_mem.pop(0))
-                elif isinstance(b, TPool):
-                    # needs special handling here since pools may use more memory
-                    # length than the rest of the mem blocks do
-                    if in_mem is None:
-                        pool_mem = torch.cat([xt*0]*b.stride, 1)
+                    # mem blocks are simple since we're visiting the graph in causal order
+                    if mem[i] is None:
+                        xt_new = b(xt, xt * 0)
+                        mem[i] = xt
                     else:
-                        pool_mem = torch.cat([in_mem.pop(0), xt], 1)[:, -(b.stride*xt.shape[1]):]
-                    out_mem.append(pool_mem)
-                    _NT, C, H, W = xt.shape
-                    xt = b(pool_mem.view(-1, C, H, W))
-                else:
+                        xt_new = b(xt, mem[i])
+                        mem[i].copy_(xt) # inplace might reduce mysterious pytorch memory allocations? doesn't help though
+                    # add successor to work queue
+                    work_queue.insert(0, TWorkItem(xt_new, i+1))
+                elif isinstance(b, TPool):
+                    # pool blocks are miserable
+                    if mem[i] is None:
+                        mem[i] = [] # pool memory is itself a queue of inputs to pool
+                    mem[i].append(xt)
+                    if len(mem[i]) > b.stride:
+                        # pool mem is in invalid state, we should have pooled before this
+                        raise ValueError("???")
+                    elif len(mem[i]) < b.stride:
+                        # pool mem is not yet full, go back to processing the work queue
+                        pass
+                    else:
+                        # pool mem is ready, run the pool block
+                        N, C, H, W = xt.shape 
+                        xt = b(torch.cat(mem[i], 1).view(N*b.stride, C, H, W))
+                        # reset the pool mem
+                        mem[i] = []
+                        # add successor to work queue
+                        work_queue.insert(0, TWorkItem(xt, i+1))
+                elif isinstance(b, TGrow):
                     xt = b(xt)
-            out.append(xt)
-            in_mem = out_mem
-        # TODO(oboerbohan): I think there's still a memory leak here or sth?
+                    NT, C, H, W = xt.shape
+                    # each tgrow has multiple successor nodes
+                    for xt_next in reversed(xt.view(N, b.stride*C, H, W).chunk(b.stride, 1)):
+                        # add successor to work queue
+                        work_queue.insert(0, TWorkItem(xt_next, i+1))
+                else:
+                    # normal block with no funny business
+                    xt = b(xt)
+                    # add successor to work queue
+                    work_queue.insert(0, TWorkItem(xt, i+1))
+        progress_bar.close()
         x = torch.stack(out, 1)
     return x
         
@@ -209,16 +251,16 @@ def main():
             print(f"  {video_path} seems small enough, will process all frames in parallel")
             # convert to device tensor
             vid_enc = taem1.encode_video(vid_dev)
-            print(f"  Encoded {video_path}. Decoding...")
+            print(f"  Encoded {video_path} -> {vid_enc.shape}. Decoding...")
             vid_dec = taem1.decode_video(vid_enc)
-            print(f"  Decoded {video_path}")
+            print(f"  Decoded {video_path} -> {vid_dec.shape}")
         else:
             print(f"  {video_path} seems large, will process each frame sequentially")
             # convert to device tensor
             vid_enc = taem1.encode_video(vid_dev, parallel=False)
-            print(f"  Encoded {video_path}. Decoding...")
+            print(f"  Encoded {video_path} -> {vid_enc.shape}. Decoding...")
             vid_dec = taem1.decode_video(vid_enc, parallel=False)
-            print(f"  Decoded {video_path}")
+            print(f"  Decoded {video_path} -> {vid_dec.shape}")
         video_out_path = video_path + ".reconstructed_by_taem1.mp4"
         video_out = VideoTensorWriter(video_out_path, (vid_dec.shape[-1], vid_dec.shape[-2]), fps=int(round(video_in.fps)))
         for frame in vid_dec.clamp_(0, 1).mul_(255).round_().byte().cpu()[0]:
