@@ -8,7 +8,7 @@ This means TAEM1 should be useful for previewing outputs from Mochi 1.
 
 | Sample Video | Reconstruction with TAEM1 |
 | ------------ | ------------------------- |
-| <video src="https://github.com/user-attachments/assets/97560b3b-ea32-4ba8-9ca6-4c6be66b6976"/> | <video src="https://github.com/user-attachments/assets/003aa013-b795-4c80-8a13-a1dd1f1b0b8b"/> |
+| ![test_video_0 mp4](https://github.com/user-attachments/assets/5eabed4c-c942-43d6-9e6d-aeb2bba9fad0) | ![test_video_0 mp4 reconstructed_by_taem1 mp4](https://github.com/user-attachments/assets/4b77a175-8374-4b3d-a18a-f296aa696ab3) |
 
 ## How does TAEM1 work?
 
